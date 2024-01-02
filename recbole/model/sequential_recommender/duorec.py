@@ -22,14 +22,16 @@ from recbole.model.abstract_recommender import SequentialRecommender
 from recbole.model.layers import TransformerEncoder
 from recbole.model.loss import BPRLoss
 
+
 class _MockDataset:
     """This mock dataset is used in inference/evaluation time.
-       When creating DuoRec instance, you can specify num_items and keep dataset as None. Then this class will be used.
-       This way, you dont need to create dataset before you create duorec instance.
+    When creating DuoRec instance, you can specify num_items and keep dataset as None. Then this class will be used.
+    This way, you dont need to create dataset before you create duorec instance.
     """
-    def __init__(self, val:int) -> None:
+
+    def __init__(self, val: int) -> None:
         self.val = val
-        
+
     def num(self, *args, **kwargs):
         return self.val
 
@@ -57,13 +59,12 @@ class DuoRec(SequentialRecommender):
         self.n_layers = config["n_layers"]
         self.n_heads = config["n_heads"]
         self.hidden_size = config["hidden_size"]  # same as embedding_size
-        self.inner_size = config[
-            "inner_size"
-        ]  # the dimensionality in feed-forward layer
+        self.inner_size = config["inner_size"]  # the dimensionality in feed-forward layer
         self.hidden_dropout_prob = config["hidden_dropout_prob"]
         self.attn_dropout_prob = config["attn_dropout_prob"]
         self.hidden_act = config["hidden_act"]
         self.layer_norm_eps = config["layer_norm_eps"]
+        self.rating_as_event_type = config["rating_as_event_type"]
 
         self.lmd = config["lmd"]
         self.lmd_sem = config["lmd_sem"]
@@ -72,10 +73,15 @@ class DuoRec(SequentialRecommender):
         self.loss_type = config["loss_type"]
 
         # define layers and loss
-        self.item_embedding = nn.Embedding(
-            self.n_items, self.hidden_size, padding_idx=0
-        )
+        self.item_embedding = nn.Embedding(self.n_items, self.hidden_size, padding_idx=0)
         self.position_embedding = nn.Embedding(self.max_seq_length, self.hidden_size)
+        # ratting embedding:
+        if self.rating_as_event_type:
+            self._event_set = set(dataset.pre_processed_data[config["RATING_FIELD"]].int().tolist())
+            self.RATING_SEQ = f'{config["RATING_FIELD"]}_list'
+            self.n_event = len(self._event_set)
+            self.event_embedding = nn.Embedding(self.n_event + 1, self.hidden_size, padding_idx=0)
+
         self.trm_encoder = TransformerEncoder(
             n_layers=self.n_layers,
             n_heads=self.n_heads,
@@ -134,9 +140,7 @@ class DuoRec(SequentialRecommender):
     def get_attention_mask(self, item_seq):
         """Generate left-to-right uni-directional attention mask for multi-head attention."""
         attention_mask = (item_seq > 0).long()
-        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(
-            2
-        )  # torch.int64
+        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # torch.int64
         # mask for left-to-right unidirectional
         max_len = attention_mask.size(-1)
         attn_shape = (1, max_len, max_len)
@@ -145,43 +149,36 @@ class DuoRec(SequentialRecommender):
         subsequent_mask = subsequent_mask.long().to(item_seq.device)
 
         extended_attention_mask = extended_attention_mask * subsequent_mask
-        extended_attention_mask = extended_attention_mask.to(
-            dtype=next(self.parameters()).dtype
-        )  # fp16 compatibility
+        extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
         return extended_attention_mask
 
     def get_bi_attention_mask(self, item_seq):
         """Generate bidirectional attention mask for multi-head attention."""
         attention_mask = (item_seq > 0).long()
-        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(
-            2
-        )  # torch.int64
+        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # torch.int64
         # bidirectional mask
-        extended_attention_mask = extended_attention_mask.to(
-            dtype=next(self.parameters()).dtype
-        )  # fp16 compatibility
+        extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
         return extended_attention_mask
 
-    def forward(self, item_seq, item_seq_len):
-        position_ids = torch.arange(
-            item_seq.size(1), dtype=torch.long, device=item_seq.device
-        )
+    def forward(self, item_seq, item_seq_len, rating_seq=None):
+        position_ids = torch.arange(item_seq.size(1), dtype=torch.long, device=item_seq.device)
         position_ids = position_ids.unsqueeze(0).expand_as(item_seq)
         position_embedding = self.position_embedding(position_ids)
 
         item_emb = self.item_embedding(item_seq)
         input_emb = item_emb + position_embedding
+        if rating_seq is not None:
+            event_emb = self.event_embedding(rating_seq)
+            input_emb += event_emb
         input_emb = self.LayerNorm(input_emb)
         input_emb = self.dropout(input_emb)
 
         extended_attention_mask = self.get_attention_mask(item_seq)
         # extended_attention_mask = self.get_bi_attention_mask(item_seq)
 
-        trm_output = self.trm_encoder(
-            input_emb, extended_attention_mask, output_all_encoded_layers=True
-        )
+        trm_output = self.trm_encoder(input_emb, extended_attention_mask, output_all_encoded_layers=True)
         output = trm_output[-1]
         output = self.gather_indexes(output, item_seq_len - 1)
         return output  # [B H]
@@ -189,7 +186,12 @@ class DuoRec(SequentialRecommender):
     def calculate_loss(self, interaction):
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
-        seq_output = self.forward(item_seq, item_seq_len)
+        if self.rating_as_event_type:
+            rating_seq = interaction[self.RATING_SEQ]
+            rating_seq = rating_seq.int()
+        else:
+            rating_seq = None
+        seq_output = self.forward(item_seq, item_seq_len, rating_seq=rating_seq)
         pos_items = interaction[self.POS_ITEM_ID]
         if self.loss_type == "BPR":
             neg_items = interaction[self.NEG_ITEM_ID]
@@ -293,10 +295,7 @@ class DuoRec(SequentialRecommender):
         z = torch.cat((z_i, z_j), dim=0)
 
         if sim == "cos":
-            sim = (
-                nn.functional.cosine_similarity(z.unsqueeze(1), z.unsqueeze(0), dim=2)
-                / temp
-            )
+            sim = nn.functional.cosine_similarity(z.unsqueeze(1), z.unsqueeze(0), dim=2) / temp
         elif sim == "dot":
             sim = torch.mm(z, z.T) / temp
 
