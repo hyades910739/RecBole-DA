@@ -207,7 +207,7 @@ class DuoRec(SequentialRecommender):
 
         # Unsupervised NCE
         if self.ssl in ["us", "un"]:
-            aug_seq_output = self.forward(item_seq, item_seq_len)
+            aug_seq_output = self.forward(item_seq, item_seq_len, rating_seq=rating_seq)
             nce_logits, nce_labels = self.info_nce(
                 seq_output,
                 aug_seq_output,
@@ -232,7 +232,7 @@ class DuoRec(SequentialRecommender):
                 interaction["sem_aug"],
                 interaction["sem_aug_lengths"],
             )
-            sem_aug_seq_output = self.forward(sem_aug, sem_aug_lengths)
+            sem_aug_seq_output = self.forward(sem_aug, sem_aug_lengths, rating_seq=rating_seq)
 
             sem_nce_logits, sem_nce_labels = self.info_nce(
                 seq_output,
@@ -252,13 +252,13 @@ class DuoRec(SequentialRecommender):
             loss += self.lmd_sem * self.aug_nce_fct(sem_nce_logits, sem_nce_labels)
 
         if self.ssl == "us_x":
-            aug_seq_output = self.forward(item_seq, item_seq_len)
+            aug_seq_output = self.forward(item_seq, item_seq_len, rating_seq=rating_seq)
 
             sem_aug, sem_aug_lengths = (
                 interaction["sem_aug"],
                 interaction["sem_aug_lengths"],
             )
-            sem_aug_seq_output = self.forward(sem_aug, sem_aug_lengths)
+            sem_aug_seq_output = self.forward(sem_aug, sem_aug_lengths, rating_seq=rating_seq)
 
             sem_nce_logits, sem_nce_labels = self.info_nce(
                 aug_seq_output,
@@ -344,7 +344,13 @@ class DuoRec(SequentialRecommender):
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
         test_item = interaction[self.ITEM_ID]
-        seq_output = self.forward(item_seq, item_seq_len)
+
+        if self.rating_as_event_type:
+            rating_seq = interaction[self.RATING_SEQ]
+            rating_seq = rating_seq.int()
+        else:
+            rating_seq = None
+        seq_output = self.forward(item_seq, item_seq_len, rating_seq=rating_seq)
         test_item_emb = self.item_embedding(test_item)
         scores = torch.mul(seq_output, test_item_emb).sum(dim=1)  # [B]
         return scores
@@ -352,7 +358,12 @@ class DuoRec(SequentialRecommender):
     def full_sort_predict(self, interaction):
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
-        seq_output = self.forward(item_seq, item_seq_len)
+        if self.rating_as_event_type:
+            rating_seq = interaction[self.RATING_SEQ]
+            rating_seq = rating_seq.int()
+        else:
+            rating_seq = None
+        seq_output = self.forward(item_seq, item_seq_len, rating_seq=rating_seq)
         test_items_emb = self.item_embedding.weight
         scores = torch.matmul(seq_output, test_items_emb.transpose(0, 1))  # [B n_items]
         return scores
