@@ -16,11 +16,10 @@ Reference:
 """
 
 import torch
-from torch import nn
-
 from recbole.model.abstract_recommender import SequentialRecommender
 from recbole.model.layers import TransformerEncoder
 from recbole.model.loss import BPRLoss
+from torch import nn
 
 
 class _MockDataset:
@@ -186,11 +185,7 @@ class DuoRec(SequentialRecommender):
     def calculate_loss(self, interaction):
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
-        if self.rating_as_event_type:
-            rating_seq = interaction[self.RATING_SEQ]
-            rating_seq = rating_seq.int()
-        else:
-            rating_seq = None
+        rating_seq = self._get_rating_event(interaction)
         seq_output = self.forward(item_seq, item_seq_len, rating_seq=rating_seq)
         pos_items = interaction[self.POS_ITEM_ID]
         if self.loss_type == "BPR":
@@ -344,12 +339,8 @@ class DuoRec(SequentialRecommender):
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
         test_item = interaction[self.ITEM_ID]
+        rating_seq = self._get_rating_event(interaction)
 
-        if self.rating_as_event_type:
-            rating_seq = interaction[self.RATING_SEQ]
-            rating_seq = rating_seq.int()
-        else:
-            rating_seq = None
         seq_output = self.forward(item_seq, item_seq_len, rating_seq=rating_seq)
         test_item_emb = self.item_embedding(test_item)
         scores = torch.mul(seq_output, test_item_emb).sum(dim=1)  # [B]
@@ -358,12 +349,25 @@ class DuoRec(SequentialRecommender):
     def full_sort_predict(self, interaction):
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
-        if self.rating_as_event_type:
-            rating_seq = interaction[self.RATING_SEQ]
-            rating_seq = rating_seq.int()
-        else:
-            rating_seq = None
+        rating_seq = self._get_rating_event(interaction)
         seq_output = self.forward(item_seq, item_seq_len, rating_seq=rating_seq)
         test_items_emb = self.item_embedding.weight
         scores = torch.matmul(seq_output, test_items_emb.transpose(0, 1))  # [B n_items]
         return scores
+
+    def _get_rating_event(self, interaction):
+        """
+        When
+        """
+        if self.rating_as_event_type:
+            try:
+                rating_seq = interaction[self.RATING_SEQ]
+            except KeyError:
+                raise KeyError(
+                    f'This model is trained with event type. You should provide rating sequence in field "{self.RATING_SEQ}"'
+                )
+            rating_seq = rating_seq.int()
+        else:
+            # this model is not train with event type, just set rating seq as None.
+            rating_seq = None
+        return rating_seq
